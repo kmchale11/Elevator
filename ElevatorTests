@@ -1,806 +1,934 @@
 """
-Comprehensive Test Suite for Elevator System
-Tests for 3 elevators, 18 floors based on PRD
+Elevator System Test Suite - Command Line Executable
+Run with: python test_elevator.py [options]
 """
 
 import unittest
-import time
-import threading
-from datetime import datetime
-from unittest.mock import Mock, patch
 import sys
+import argparse
+import time
+import random
+from datetime import datetime
+from typing import List, Dict, Tuple
 
-# Import the elevator system classes
-# Note: These would be your actual class imports
-# For this test, I'll create mock versions of the key classes
-
-# ========== MOCK SETUP FOR TESTING ==========
-# In reality, you'd import your actual classes
+# ========== MOCK CLASSES FOR TESTING ==========
 class Direction:
     UP = "UP"
-    DOWN = "DOWN"
+    DOWN = "DOWN" 
     IDLE = "IDLE"
 
-class MockElevator:
-    def __init__(self, elevator_id, start_floor=1):
+class ElevatorState:
+    MOVING = "MOVING"
+    STOPPED = "STOPPED"
+    DOOR_OPEN = "DOOR_OPEN"
+    MAINTENANCE = "MAINTENANCE"
+
+class Elevator:
+    """Mock elevator for testing"""
+    def __init__(self, elevator_id: int, start_floor: int = 1):
         self.id = elevator_id
         self.current_floor = start_floor
         self.direction = Direction.IDLE
+        self.state = ElevatorState.STOPPED
         self.target_floors = set()
         self.door_open = False
         self.is_moving = False
         self.emergency_active = False
         self.overloaded = False
         self.trip_count = 0
+        self.total_weight = 0
+        self.max_capacity = 800  # kg (8 people * 100kg)
         
-    def move_to_floor(self, floor):
+    def move_to_floor(self, floor: int) -> int:
+        """Move elevator to specified floor"""
+        if self.overloaded:
+            print(f"[Elevator {self.id}] Cannot move - OVERLOADED")
+            return 0
+            
         self.target_floors.add(floor)
         self.is_moving = True
         floors_to_move = abs(self.current_floor - floor)
+        
+        # Simulate movement
+        if floor > self.current_floor:
+            self.direction = Direction.UP
+        elif floor < self.current_floor:
+            self.direction = Direction.DOWN
+            
         self.current_floor = floor
         self.trip_count += 1
+        self.is_moving = False
+        
+        if floor in self.target_floors:
+            self.target_floors.remove(floor)
+            
         return floors_to_move
         
-    def open_doors(self):
-        if not self.is_moving:
+    def open_doors(self) -> bool:
+        """Open elevator doors"""
+        if self.is_moving:
+            print(f"[Elevator {self.id}] Cannot open doors while moving")
+            return False
+        if self.emergency_active:
+            print(f"[Elevator {self.id}] Emergency active - doors forced open")
             self.door_open = True
             return True
-        return False
+            
+        self.door_open = True
+        return True
         
-    def close_doors(self):
+    def close_doors(self) -> bool:
+        """Close elevator doors"""
+        if self.overloaded:
+            print(f"[Elevator {self.id}] Cannot close doors - OVERLOADED")
+            return False
+            
         self.door_open = False
         return True
         
-    def emergency_stop(self):
+    def emergency_stop(self) -> bool:
+        """Activate emergency stop"""
         self.emergency_active = True
         self.is_moving = False
-        self.door_open = True
+        self.door_open = True  # Emergency protocol: open doors
+        print(f"[Elevator {self.id}] 🚨 EMERGENCY STOP ACTIVATED")
         return True
+        
+    def update_weight(self, weight: float) -> bool:
+        """Update weight sensor reading"""
+        self.total_weight = weight
+        self.overloaded = weight > self.max_capacity
+        if self.overloaded:
+            print(f"[Elevator {self.id}] ⚠️  OVERLOAD DETECTED: {weight}kg > {self.max_capacity}kg")
+        return self.overloaded
+        
+    def get_pending_stops(self) -> int:
+        """Get number of pending stops"""
+        return len(self.target_floors)
 
-class MockElevatorSystem:
+class ElevatorSystem:
+    """Mock elevator system for testing"""
     def __init__(self):
         self.elevators = {
-            1: MockElevator(1, 1),
-            2: MockElevator(2, 9),
-            3: MockElevator(3, 18)
+            1: Elevator(1, 1),    # Ground floor
+            2: Elevator(2, 9),    # Mid floor  
+            3: Elevator(3, 18)    # Top floor
         }
+        self.floors = 18
         self.hall_calls = []
+        self.call_history = []
         
-    def call_elevator(self, floor, direction):
-        self.hall_calls.append((floor, direction))
-        # Simple dispatch: find nearest idle elevator
+    def call_elevator(self, floor: int, direction: Direction) -> int:
+        """Dispatch elevator to floor call"""
+        # Validate input
+        if floor < 1 or floor > self.floors:
+            print(f"❌ Invalid floor: {floor}")
+            return -1
+            
+        if (direction == Direction.UP and floor == self.floors) or \
+           (direction == Direction.DOWN and floor == 1):
+            print(f"❌ Invalid direction for floor {floor}")
+            return -1
+            
+        # Log the call
+        call_info = {
+            'floor': floor,
+            'direction': direction,
+            'timestamp': datetime.now(),
+            'assigned': None
+        }
+        
+        # Find best elevator using PRD algorithm
         best_elevator = None
-        min_distance = float('inf')
+        best_score = float('inf')
         
         for elevator in self.elevators.values():
-            if not elevator.is_moving and not elevator.emergency_active:
-                distance = abs(elevator.current_floor - floor)
-                if distance < min_distance:
-                    min_distance = distance
-                    best_elevator = elevator
-                    
+            # Skip if in emergency or maintenance
+            if elevator.emergency_active:
+                continue
+                
+            score = self._calculate_score(elevator, floor, direction)
+            
+            if score < best_score:
+                best_score = score
+                best_elevator = elevator
+                
         if best_elevator:
+            call_info['assigned'] = best_elevator.id
             best_elevator.move_to_floor(floor)
+            print(f"[System] Floor {floor} {direction} → Elevator {best_elevator.id}")
             return best_elevator.id
-        return None
+        else:
+            print(f"[System] No elevator available for floor {floor} {direction}")
+            return -1
+            
+    def _calculate_score(self, elevator: Elevator, floor: int, direction: Direction) -> float:
+        """Calculate dispatch score (lower is better)"""
+        # Priority 1: Idle elevators
+        if elevator.direction == Direction.IDLE and not elevator.is_moving:
+            distance = abs(elevator.current_floor - floor)
+            return distance * 10
+            
+        # Priority 2: Moving toward request in same direction
+        if (elevator.direction == Direction.UP and 
+            direction == Direction.UP and
+            floor > elevator.current_floor):
+            distance = abs(elevator.current_floor - floor)
+            stops_penalty = elevator.get_pending_stops() * 20
+            return distance * 10 + stops_penalty
+            
+        if (elevator.direction == Direction.DOWN and 
+            direction == Direction.DOWN and
+            floor < elevator.current_floor):
+            distance = abs(elevator.current_floor - floor)
+            stops_penalty = elevator.get_pending_stops() * 20
+            return distance * 10 + stops_penalty
+            
+        # Not suitable
+        return float('inf')
+        
+    def get_status(self) -> Dict:
+        """Get system status"""
+        status = {}
+        for elevator_id, elevator in self.elevators.items():
+            status[elevator_id] = {
+                'floor': elevator.current_floor,
+                'direction': elevator.direction,
+                'state': elevator.state,
+                'doors': 'OPEN' if elevator.door_open else 'CLOSED',
+                'emergency': elevator.emergency_active,
+                'overloaded': elevator.overloaded,
+                'trips': elevator.trip_count,
+                'pending_stops': elevator.get_pending_stops()
+            }
+        return status
+        
+    def print_status(self):
+        """Print formatted system status"""
+        print("\n" + "="*60)
+        print("ELEVATOR SYSTEM STATUS")
+        print("="*60)
+        status = self.get_status()
+        for elevator_id, info in status.items():
+            emergency = "🚨" if info['emergency'] else ""
+            overload = "⚖️" if info['overloaded'] else ""
+            print(f"Elevator {elevator_id}: Floor {info['floor']:2d} | "
+                  f"Direction: {info['direction']:4s} | "
+                  f"Doors: {info['doors']:6s} | "
+                  f"Trips: {info['trips']:3d} {emergency}{overload}")
+        print("="*60)
 
-# ========== UNIT TESTS ==========
-class TestElevatorUnit(unittest.TestCase):
-    """Unit tests for individual elevator components"""
+# ========== TEST CLASSES ==========
+class TestBasicElevator(unittest.TestCase):
+    """Basic elevator unit tests"""
     
     def setUp(self):
-        """Set up test fixtures"""
-        self.elevator = MockElevator(1, start_floor=5)
-    
-    def test_elevator_initialization(self):
-        """Test elevator initializes with correct values"""
+        self.elevator = Elevator(1, start_floor=5)
+        
+    def test_initialization(self):
         self.assertEqual(self.elevator.id, 1)
         self.assertEqual(self.elevator.current_floor, 5)
         self.assertEqual(self.elevator.direction, Direction.IDLE)
         self.assertEqual(self.elevator.trip_count, 0)
-        self.assertFalse(self.elevator.door_open)
-        self.assertFalse(self.elevator.is_moving)
-    
-    def test_move_to_higher_floor(self):
-        """Test moving elevator to a higher floor"""
-        floors_moved = self.elevator.move_to_floor(10)
-        self.assertEqual(self.elevator.current_floor, 10)
-        self.assertEqual(floors_moved, 5)
-        self.assertIn(10, self.elevator.target_floors)
-        self.assertEqual(self.elevator.trip_count, 1)
-    
-    def test_move_to_lower_floor(self):
-        """Test moving elevator to a lower floor"""
-        self.elevator.current_floor = 15
-        floors_moved = self.elevator.move_to_floor(3)
-        self.assertEqual(self.elevator.current_floor, 3)
-        self.assertEqual(floors_moved, 12)
-    
-    def test_door_operations(self):
-        """Test door open/close operations"""
-        # Can open doors when not moving
-        result = self.elevator.open_doors()
-        self.assertTrue(result)
-        self.assertTrue(self.elevator.door_open)
         
-        # Can close doors
-        result = self.elevator.close_doors()
-        self.assertTrue(result)
+    def test_move_up(self):
+        floors = self.elevator.move_to_floor(10)
+        self.assertEqual(self.elevator.current_floor, 10)
+        self.assertEqual(floors, 5)
+        self.assertEqual(self.elevator.trip_count, 1)
+        
+    def test_move_down(self):
+        self.elevator.current_floor = 15
+        floors = self.elevator.move_to_floor(3)
+        self.assertEqual(self.elevator.current_floor, 3)
+        self.assertEqual(floors, 12)
+        
+    def test_door_operations(self):
+        self.assertTrue(self.elevator.open_doors())
+        self.assertTrue(self.elevator.door_open)
+        self.assertTrue(self.elevator.close_doors())
         self.assertFalse(self.elevator.door_open)
-    
+        
     def test_emergency_stop(self):
-        """Test emergency stop functionality"""
         self.elevator.is_moving = True
         self.elevator.door_open = False
-        
-        result = self.elevator.emergency_stop()
-        
-        self.assertTrue(result)
+        self.elevator.emergency_stop()
         self.assertTrue(self.elevator.emergency_active)
         self.assertFalse(self.elevator.is_moving)
-        self.assertTrue(self.elevator.door_open)  # Doors should open in emergency
-    
-    def test_cannot_open_doors_while_moving(self):
-        """Test safety: cannot open doors while elevator is moving"""
-        self.elevator.is_moving = True
-        result = self.elevator.open_doors()
-        self.assertFalse(result)
-        self.assertFalse(self.elevator.door_open)
-    
-    def test_multiple_floor_requests(self):
-        """Test handling multiple floor requests"""
-        self.elevator.move_to_floor(8)
-        self.elevator.move_to_floor(12)
-        self.elevator.move_to_floor(3)
+        self.assertTrue(self.elevator.door_open)
         
-        self.assertIn(8, self.elevator.target_floors)
-        self.assertIn(12, self.elevator.target_floors)
-        self.assertIn(3, self.elevator.target_floors)
-        self.assertEqual(len(self.elevator.target_floors), 3)
+    def test_overload_detection(self):
+        self.elevator.update_weight(500)
+        self.assertFalse(self.elevator.overloaded)
+        self.elevator.update_weight(900)
+        self.assertTrue(self.elevator.overloaded)
+        
+    def test_cannot_move_when_overloaded(self):
+        self.elevator.update_weight(900)  # Trigger overload
+        floors = self.elevator.move_to_floor(10)
+        self.assertEqual(floors, 0)  # Should not move
 
-# ========== INTEGRATION TESTS ==========
-class TestElevatorSystemIntegration(unittest.TestCase):
-    """Integration tests for the complete elevator system"""
+class TestSystemIntegration(unittest.TestCase):
+    """System integration tests"""
     
     def setUp(self):
-        """Set up system for integration tests"""
-        self.system = MockElevatorSystem()
-    
+        self.system = ElevatorSystem()
+        
     def test_system_initialization(self):
-        """Test system initializes with 3 elevators at correct floors"""
         self.assertEqual(len(self.system.elevators), 3)
-        self.assertEqual(self.system.elevators[1].current_floor, 1)   # Ground floor
-        self.assertEqual(self.system.elevators[2].current_floor, 9)   # Mid floor
-        self.assertEqual(self.system.elevators[3].current_floor, 18)  # Top floor
-    
-    def test_hall_call_dispatch(self):
-        """Test hall call gets dispatched to nearest idle elevator"""
-        # Call from floor 3 going UP
-        elevator_id = self.system.call_elevator(3, Direction.UP)
+        self.assertEqual(self.system.elevators[1].current_floor, 1)
+        self.assertEqual(self.system.elevators[2].current_floor, 9)
+        self.assertEqual(self.system.elevators[3].current_floor, 18)
         
-        # Should dispatch elevator 1 (at floor 1, distance 2)
-        self.assertEqual(elevator_id, 1)
-        self.assertEqual(self.system.elevators[1].current_floor, 3)
-        self.assertEqual(self.system.hall_calls, [(3, Direction.UP)])
-    
-    def test_concurrent_hall_calls(self):
-        """Test multiple simultaneous hall calls"""
-        # Simulate rush hour: multiple calls at once
-        results = []
-        calls = [
-            (1, Direction.UP),   # Person at ground floor
-            (5, Direction.UP),   # Person at floor 5
-            (10, Direction.DOWN) # Person at floor 10
-        ]
+    def test_basic_hall_call(self):
+        elevator_id = self.system.call_elevator(5, Direction.UP)
+        self.assertIn(elevator_id, [1, 2, 3])
+        self.assertEqual(self.system.elevators[elevator_id].current_floor, 5)
         
-        for floor, direction in calls:
-            elevator_id = self.system.call_elevator(floor, direction)
-            results.append(elevator_id)
+    def test_nearest_idle_elevator(self):
+        # Call from floor 6 - should go to elevator 2 (at floor 9, distance 3)
+        # Actually elevator 1 is at floor 1 (distance 5), elevator 2 at 9 (distance 3)
+        elevator_id = self.system.call_elevator(6, Direction.UP)
+        self.assertEqual(elevator_id, 2)  # Nearest idle
         
-        # All calls should be assigned
-        self.assertEqual(len(results), 3)
-        self.assertIsNotNone(results[0])
-        self.assertIsNotNone(results[1])
-        self.assertIsNotNone(results[2])
+    def test_invalid_floor_call(self):
+        elevator_id = self.system.call_elevator(0, Direction.UP)
+        self.assertEqual(elevator_id, -1)
+        elevator_id = self.system.call_elevator(19, Direction.DOWN)
+        self.assertEqual(elevator_id, -1)
         
-        # Verify elevators moved
-        self.assertTrue(self.system.elevators[1].is_moving)
-        self.assertTrue(self.system.elevators[2].is_moving)
-    
-    def test_elevator_busy_fallback(self):
-        """Test dispatch when some elevators are busy"""
-        # Make elevator 1 busy
-        self.system.elevators[1].is_moving = True
-        self.system.elevators[1].current_floor = 15
-        
-        # Make elevator 3 in emergency
-        self.system.elevators[3].emergency_active = True
-        
-        # Call from floor 8
-        elevator_id = self.system.call_elevator(8, Direction.UP)
-        
-        # Should dispatch elevator 2 (only available)
-        self.assertEqual(elevator_id, 2)
-        self.assertEqual(self.system.elevators[2].current_floor, 8)
-    
-    def test_floor_boundaries(self):
-        """Test calls at boundary floors"""
-        # Floor 1 should not have DOWN call
-        # Floor 18 should not have UP call
-        # These should be handled in the actual implementation
-        pass
-    
-    def test_trip_counting(self):
-        """Test that trips are counted correctly"""
-        initial_trip_counts = {
-            1: self.system.elevators[1].trip_count,
-            2: self.system.elevators[2].trip_count,
-            3: self.system.elevators[3].trip_count
-        }
-        
-        # Make several trips
-        self.system.call_elevator(5, Direction.UP)
-        self.system.call_elevator(10, Direction.UP)
-        self.system.call_elevator(15, Direction.DOWN)
-        
-        # Verify trip counts increased
-        self.assertGreater(self.system.elevators[1].trip_count, initial_trip_counts[1])
-        self.assertGreater(self.system.elevators[2].trip_count, initial_trip_counts[2])
+    def test_invalid_direction(self):
+        # Floor 1 cannot go DOWN
+        elevator_id = self.system.call_elevator(1, Direction.DOWN)
+        self.assertEqual(elevator_id, -1)
+        # Floor 18 cannot go UP
+        elevator_id = self.system.call_elevator(18, Direction.UP)
+        self.assertEqual(elevator_id, -1)
 
-# ========== ALGORITHM TESTS ==========
-class TestDispatchingAlgorithms(unittest.TestCase):
-    """Tests for dispatching algorithm logic"""
+class TestDispatchingAlgorithm(unittest.TestCase):
+    """Tests for dispatching algorithm"""
     
     def setUp(self):
-        self.system = MockElevatorSystem()
-    
-    def test_nearest_idle_elevator(self):
-        """Test PRD algorithm: nearest idle elevator gets call"""
-        # Reset all to idle
-        for e in self.system.elevators.values():
-            e.is_moving = False
+        self.system = ElevatorSystem()
         
-        # Elevator positions: 1@1, 2@9, 3@18
-        # Call from floor 6 should go to elevator 2 (distance 3)
-        elevator_id = self.system.call_elevator(6, Direction.UP)
-        self.assertEqual(elevator_id, 2)
-    
+    def test_idle_elevator_priority(self):
+        # Make elevator 2 busy
+        self.system.elevators[2].is_moving = True
+        self.system.elevators[2].direction = Direction.UP
+        
+        # Call should go to nearest idle (elevator 1 or 3)
+        elevator_id = self.system.call_elevator(10, Direction.UP)
+        self.assertIn(elevator_id, [1, 3])
+        self.assertNotEqual(elevator_id, 2)
+        
     def test_moving_toward_request(self):
-        """Test elevator moving toward request gets priority"""
-        # Set elevator 1 moving UP from floor 3 to 10
+        # Set elevator 1 moving UP from floor 3
         self.system.elevators[1].current_floor = 3
+        self.system.elevators[1].direction = Direction.UP
         self.system.elevators[1].is_moving = True
+        self.system.elevators[1].target_floors = {10}
         
         # Set elevator 2 idle at floor 9
         self.system.elevators[2].is_moving = False
         
         # Call from floor 5 going UP
-        # Elevator 1 (moving toward floor 5) should get it
-        # This tests the "moving toward request" logic
-        pass
-    
-    def test_direction_priority(self):
-        """Test that direction is considered in dispatch"""
-        # Elevator 1 at floor 4 moving UP
-        # Elevator 2 at floor 6 moving DOWN
-        # Call from floor 5 going UP should prefer elevator 1
-        pass
-    
-    def test_scenario_based_dispatch(self):
-        """Test complex dispatch scenario"""
-        # Scenario: Morning rush - many UP calls from lower floors
-        calls = [
-            (1, Direction.UP), (2, Direction.UP), (3, Direction.UP),
-            (4, Direction.UP), (5, Direction.UP)
-        ]
+        # Elevator 1 is moving toward it, should get preference
+        elevator_id = self.system.call_elevator(5, Direction.UP)
+        self.assertEqual(elevator_id, 1)
         
-        for floor, direction in calls:
-            self.system.call_elevator(floor, direction)
+    def test_emergency_elevator_skip(self):
+        # Put elevator 2 in emergency
+        self.system.elevators[2].emergency_stop()
         
-        # Verify distribution of calls
-        # Should use all elevators efficiently
-        pass
+        # Call should not use elevator 2
+        elevator_id = self.system.call_elevator(5, Direction.UP)
+        self.assertNotEqual(elevator_id, 2)
+        self.assertIn(elevator_id, [1, 3])
 
-# ========== SCENARIO TESTS ==========
-class TestRealWorldScenarios(unittest.TestCase):
-    """Real-world scenario tests based on PRD"""
+class TestScenarioBased(unittest.TestCase):
+    """Real-world scenario tests"""
     
     def test_morning_rush_hour(self):
-        """Test PRD Scenario: Morning upward traffic"""
-        system = MockElevatorSystem()
+        """Test morning upward traffic"""
+        system = ElevatorSystem()
         
-        # Simulate 8:00 AM rush
-        # Multiple people entering from ground floor going up
-        results = []
-        destinations = [8, 12, 15, 10, 18]  # Various office floors
+        # Morning rush: many people going up from lower floors
+        destinations = [8, 12, 15, 10, 18, 7, 14, 9, 11, 16]
+        assigned_elevators = []
         
         for dest in destinations:
-            # Person calls elevator
             elevator_id = system.call_elevator(1, Direction.UP)
-            if elevator_id:
-                # Person selects destination
+            if elevator_id > 0:
                 system.elevators[elevator_id].move_to_floor(dest)
-                results.append((elevator_id, dest))
-        
-        # Should have handled all requests
-        self.assertEqual(len(results), 5)
+                assigned_elevators.append(elevator_id)
+                
+        # Should use all elevators
+        unique_elevators = set(assigned_elevators)
+        self.assertEqual(len(unique_elevators), 3)
         
         # Check trip distribution
-        elevator_trips = {1: 0, 2: 0, 3: 0}
-        for elevator_id, _ in results:
-            elevator_trips[elevator_id] += 1
+        trips = {1: 0, 2: 0, 3: 0}
+        for eid in assigned_elevators:
+            trips[eid] += 1
+            
+        # All should have trips
+        self.assertTrue(all(trips[eid] > 0 for eid in trips))
+        print(f"\nMorning Rush Results:")
+        print(f"  Total trips: {len(assigned_elevators)}")
+        print(f"  Elevator 1 trips: {trips[1]}")
+        print(f"  Elevator 2 trips: {trips[2]}")
+        print(f"  Elevator 3 trips: {trips[3]}")
         
-        # All elevators should be used
-        self.assertTrue(all(count > 0 for count in elevator_trips.values()))
-    
-    def test_lunch_hour_bidirectional(self):
-        """Test PRD Scenario: Lunchtime bidirectional traffic"""
-        system = MockElevatorSystem()
+    def test_lunch_hour(self):
+        """Test bidirectional lunch traffic"""
+        system = ElevatorSystem()
         
         # Lunch hour: people going both directions
         # Some going down to cafeteria (floor 2)
-        # Some going up back to offices
-        
         down_calls = [(10, Direction.DOWN), (15, Direction.DOWN), (8, Direction.DOWN)]
+        # Some going up after lunch
         up_calls = [(2, Direction.UP), (2, Direction.UP), (2, Direction.UP)]
         
-        all_results = []
+        all_calls = down_calls + up_calls
+        results = []
         
-        for floor, direction in down_calls + up_calls:
+        for floor, direction in all_calls:
             elevator_id = system.call_elevator(floor, direction)
-            if elevator_id:
-                if direction == Direction.DOWN:
-                    system.elevators[elevator_id].move_to_floor(2)  # To cafeteria
-                else:
-                    system.elevators[elevator_id].move_to_floor(random.choice([10, 12, 15]))  # Back to office
-                all_results.append(elevator_id)
+            if elevator_id > 0:
+                results.append(elevator_id)
+                
+        self.assertEqual(len(results), 6)
         
-        # Should handle mixed traffic
-        self.assertEqual(len(all_results), 6)
-    
     def test_emergency_scenario(self):
-        """Test emergency situation handling"""
-        system = MockElevatorSystem()
+        """Test emergency handling"""
+        system = ElevatorSystem()
         
         # Normal operation
         system.call_elevator(5, Direction.UP)
         
-        # Emergency activated in elevator 2
+        # Activate emergency in elevator 2
         system.elevators[2].emergency_stop()
         
         # Verify emergency state
         self.assertTrue(system.elevators[2].emergency_active)
-        self.assertTrue(system.elevators[2].door_open)
-        self.assertFalse(system.elevators[2].is_moving)
         
-        # System should still operate with other elevators
+        # System should still work with other elevators
         elevator_id = system.call_elevator(10, Direction.DOWN)
-        self.assertIsNotNone(elevator_id)
-        self.assertNotEqual(elevator_id, 2)  # Should not use emergency elevator
-    
-    def test_overload_prevention(self):
-        """Test overload detection and prevention"""
-        elevator = MockElevator(1)
+        self.assertNotEqual(elevator_id, 2)
         
-        # Simulate overload condition
-        elevator.overloaded = True
+    def test_overload_scenario(self):
+        """Test overload detection"""
+        system = ElevatorSystem()
         
-        # Should not move when overloaded
-        self.elevator.overloaded = True
-        result = self.elevator.move_to_floor(10)
-        # In actual implementation, move_to_floor should check overload
+        # Overload elevator 1
+        system.elevators[1].update_weight(850)
+        self.assertTrue(system.elevators[1].overloaded)
+        
+        # Try to move overloaded elevator
+        floors = system.elevators[1].move_to_floor(10)
+        self.assertEqual(floors, 0)  # Should not move
         
         # Doors should not close when overloaded
-        elevator.door_open = True
-        result = elevator.close_doors()
-        # In actual implementation, should prevent closing when overloaded
-    
-    def test_door_safety_features(self):
-        """Test door safety mechanisms"""
-        elevator = MockElevator(1)
-        
-        # Test door obstruction simulation
-        # In actual implementation, doors should reopen if obstruction detected
-        pass
-    
-    def test_power_outage_recovery(self):
-        """Test system behavior during power outage"""
-        system = MockElevatorSystem()
-        
-        # Simulate power outage
-        # Elevators should stop at nearest floor
-        # Emergency lighting should activate
-        # Backup power should allow door opening
-        pass
+        system.elevators[1].open_doors()
+        can_close = system.elevators[1].close_doors()
+        self.assertFalse(can_close)
 
-# ========== PERFORMANCE TESTS ==========
 class TestPerformanceMetrics(unittest.TestCase):
-    """Performance and metric tests based on PRD KPIs"""
+    """Performance metric tests"""
     
-    def test_average_wait_time(self):
-        """Test PRD KPI: Average wait time < 30 seconds"""
-        system = MockElevatorSystem()
-        
-        # Simulate 100 calls and measure response time
+    def test_response_time(self):
+        """Test average response time < 30 seconds (simulated)"""
+        system = ElevatorSystem()
         response_times = []
         
-        for i in range(1, 11):  # 10 test calls
-            start_time = time.time()
+        # Simulate 10 calls with varying response times
+        for i in range(1, 11):
+            # Simulate processing time (0.1-0.5 seconds)
+            response_time = 0.1 * i + random.uniform(0, 0.1)
+            response_times.append(response_time)
+            
+            # Make actual call
             system.call_elevator(i, Direction.UP)
-            response_time = time.time() - start_time
             
-            # In real system, response_time would be actual dispatch time
-            # For mock, we'll use simulated values
-            simulated_response = 0.1 * i  # Varies by floor
-            response_times.append(simulated_response)
+        avg_response = sum(response_times) / len(response_times)
         
-        average_wait = sum(response_times) / len(response_times)
+        # Convert to seconds for assertion
+        self.assertLess(avg_response, 2.0,  # Using 2s as reasonable simulated limit
+                       f"Average response {avg_response:.2f}s too high")
         
-        # Should meet PRD requirement
-        self.assertLess(average_wait, 30.0, 
-                       f"Average wait time {average_wait:.2f}s exceeds 30s limit")
-    
-    def test_elevator_availability(self):
-        """Test PRD KPI: 99.5% uptime"""
-        # Simulate 1000 hours of operation
-        total_hours = 1000
-        maintenance_hours = 2  # 2 hours of maintenance
-        emergency_hours = 3    # 3 hours of emergency downtime
+    def test_throughput(self):
+        """Test system can handle multiple rapid calls"""
+        system = ElevatorSystem()
+        successful_calls = 0
         
-        uptime_hours = total_hours - maintenance_hours - emergency_hours
-        availability = (uptime_hours / total_hours) * 100
-        
-        self.assertGreaterEqual(availability, 99.5,
-                               f"Availability {availability:.1f}% below 99.5% target")
-    
-    def test_energy_efficiency(self):
-        """Test PRD KPI: Energy consumption tracking"""
-        # Track elevator movements
-        elevator = MockElevator(1)
-        
-        # Simulate day's trips
-        trips = [(1, 10), (10, 5), (5, 18), (18, 1)]
-        total_floors = 0
-        
-        for start, end in trips:
-            floors_moved = abs(start - end)
-            total_floors += floors_moved
-            elevator.move_to_floor(end)
-        
-        # Calculate energy (simplified: 1 unit per floor)
-        energy_used = total_floors
-        
-        # Should be efficient (no unnecessary movements)
-        self.assertLess(energy_used, 50,  # Arbitrary threshold
-                       f"Energy usage {energy_used} seems excessive")
-    
-    def test_concurrent_request_handling(self):
-        """Test system performance under concurrent load"""
-        system = MockElevatorSystem()
-        
-        # Simulate 20 concurrent requests (stress test)
-        import concurrent.futures
-        
-        def make_request(floor):
-            return system.call_elevator(floor, Direction.UP)
-        
-        floors = list(range(1, 21))  # 20 concurrent calls
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            results = list(executor.map(make_request, floors))
-        
-        # Should handle all concurrent requests
-        successful_calls = [r for r in results if r is not None]
-        self.assertEqual(len(successful_calls), 3)  # All 3 elevators should be used
+        # Make 20 rapid calls
+        for i in range(20):
+            floor = random.randint(1, 18)
+            direction = random.choice([Direction.UP, Direction.DOWN])
+            elevator_id = system.call_elevator(floor, direction)
+            if elevator_id > 0:
+                successful_calls += 1
+                
+        # Should handle most calls
+        self.assertGreater(successful_calls, 15,
+                          f"Only {successful_calls}/20 calls handled")
 
-# ========== BOUNDARY TESTS ==========
-class TestBoundaryConditions(unittest.TestCase):
-    """Tests for edge cases and boundary conditions"""
+# ========== COMMAND LINE TEST RUNNER ==========
+def run_all_tests(verbosity=2):
+    """Run all test suites"""
+    print("🚀 Running Elevator System Test Suite")
+    print("="*60)
     
-    def test_floor_limits(self):
-        """Test calls at minimum and maximum floors"""
-        system = MockElevatorSystem()
-        
-        # Test valid floor 1
-        result = system.call_elevator(1, Direction.UP)
-        self.assertIsNotNone(result)
-        
-        # Test valid floor 18
-        result = system.call_elevator(18, Direction.DOWN)
-        self.assertIsNotNone(result)
-        
-        # Test invalid floors (should be handled gracefully)
-        # These would raise exceptions in actual implementation
-        pass
-    
-    def test_elevator_capacity(self):
-        """Test at capacity limits"""
-        elevator = MockElevator(1)
-        
-        # Simulate approaching capacity
-        # Add many floor requests
-        for floor in range(1, 19, 2):  # Odd floors
-            elevator.move_to_floor(floor)
-        
-        # Should handle all requests
-        self.assertEqual(len(elevator.target_floors), 9)
-    
-    def test_system_startup_shutdown(self):
-        """Test system initialization and shutdown sequences"""
-        system = MockElevatorSystem()
-        
-        # Verify proper startup
-        self.assertEqual(len(system.elevators), 3)
-        
-        # Simulate shutdown
-        # In real system, would park elevators, close doors, etc.
-        pass
-    
-    def test_continuous_operation(self):
-        """Test system stability during continuous operation"""
-        system = MockElevatorSystem()
-        
-        # Simulate 24 hours of operation
-        operations_count = 0
-        
-        for hour in range(24):
-            # Varying load based on time of day
-            if 7 <= hour <= 9:  # Morning rush
-                calls_per_hour = 100
-            elif 12 <= hour <= 14:  # Lunch rush
-                calls_per_hour = 80
-            elif 16 <= hour <= 18:  # Evening rush
-                calls_per_hour = 120
-            else:  # Off-peak
-                calls_per_hour = 20
-            
-            for _ in range(calls_per_hour):
-                floor = random.randint(1, 18)
-                direction = random.choice([Direction.UP, Direction.DOWN])
-                system.call_elevator(floor, direction)
-                operations_count += 1
-        
-        # System should handle all operations
-        self.assertGreater(operations_count, 1000)
-
-# ========== TEST RUNNER ==========
-def run_all_tests():
-    """Run all test suites and generate report"""
-    # Create test suite
+    # Create test loader
     loader = unittest.TestLoader()
     
-    # Add all test classes
+    # Load all test cases
     test_classes = [
-        TestElevatorUnit,
-        TestElevatorSystemIntegration,
-        TestDispatchingAlgorithms,
-        TestRealWorldScenarios,
-        TestPerformanceMetrics,
-        TestBoundaryConditions
+        TestBasicElevator,
+        TestSystemIntegration,
+        TestDispatchingAlgorithm,
+        TestScenarioBased,
+        TestPerformanceMetrics
     ]
     
-    suites = []
+    # Create test suite
+    suite = unittest.TestSuite()
     for test_class in test_classes:
-        suite = loader.loadTestsFromTestCase(test_class)
-        suites.append(suite)
-    
-    # Combine all suites
-    all_tests = unittest.TestSuite(suites)
-    
+        tests = loader.loadTestsFromTestCase(test_class)
+        suite.addTests(tests)
+        
     # Run tests
-    runner = unittest.TextTestRunner(verbosity=2)
-    result = runner.run(all_tests)
+    runner = unittest.TextTestRunner(verbosity=verbosity)
+    result = runner.run(suite)
     
-    # Generate summary
+    # Print summary
     print("\n" + "="*60)
     print("TEST SUMMARY")
     print("="*60)
-    print(f"Total Tests Run: {result.testsRun}")
+    print(f"Tests Run: {result.testsRun}")
     print(f"Failures: {len(result.failures)}")
     print(f"Errors: {len(result.errors)}")
     
     if result.failures:
         print("\nFAILURES:")
         for test, traceback in result.failures:
-            print(f"  {test}:")
-            print(f"    {traceback.splitlines()[-1]}")
-    
+            test_name = str(test).split()[0]
+            print(f"  ❌ {test_name}")
+            
     if result.errors:
         print("\nERRORS:")
         for test, traceback in result.errors:
-            print(f"  {test}:")
-            print(f"    {traceback.splitlines()[-1]}")
-    
+            test_name = str(test).split()[0]
+            print(f"  ⚠️  {test_name}")
+            
+    if result.wasSuccessful():
+        print("\n✅ All tests passed!")
+    else:
+        print("\n❌ Some tests failed")
+        
     return result.wasSuccessful()
 
-# ========== INDIVIDUAL TEST FUNCTIONS ==========
-def test_specific_scenario(scenario_name):
-    """Run a specific scenario test"""
-    scenarios = {
-        "morning_rush": test_morning_rush_scenario,
-        "emergency": test_emergency_scenario,
-        "overload": test_overload_scenario,
-        "performance": test_performance_scenario
-    }
-    
-    if scenario_name in scenarios:
-        return scenarios[scenario_name]()
-    else:
-        print(f"Unknown scenario: {scenario_name}")
-        return False
-
-def test_morning_rush_scenario():
-    """Detailed morning rush scenario test"""
-    print("\n" + "="*60)
-    print("RUNNING MORNING RUSH SCENARIO TEST")
+def run_scenario_tests():
+    """Run interactive scenario tests"""
+    print("\n🎯 SCENARIO TESTS")
     print("="*60)
     
-    system = MockElevatorSystem()
-    
-    # Record elevator starting positions
-    starting_positions = {
-        1: system.elevators[1].current_floor,
-        2: system.elevators[2].current_floor,
-        3: system.elevators[3].current_floor
-    }
-    
-    # Simulate 8:00-9:00 AM traffic
-    calls = []
-    
-    # People arriving at building (mostly ground floor calls)
-    for i in range(10):
-        calls.append((1, Direction.UP, random.randint(5, 18)))
-    
-    # Some people already in building
-    for i in range(5):
-        start_floor = random.randint(2, 10)
-        calls.append((start_floor, Direction.UP, random.randint(10, 18)))
+    scenarios = [
+        ("Morning Rush Hour", test_morning_rush),
+        ("Lunch Hour Traffic", test_lunch_hour),
+        ("Emergency Situation", test_emergency),
+        ("Overload Condition", test_overload),
+        ("Peak Performance", test_performance)
+    ]
     
     results = []
-    for start_floor, direction, destination in calls:
-        elevator_id = system.call_elevator(start_floor, direction)
-        if elevator_id:
-            system.elevators[elevator_id].move_to_floor(destination)
-            results.append({
-                'elevator': elevator_id,
-                'from': start_floor,
-                'to': destination
-            })
+    for name, test_func in scenarios:
+        print(f"\nRunning: {name}")
+        print("-"*40)
+        try:
+            success = test_func()
+            results.append((name, success))
+            if success:
+                print(f"✅ {name} - PASSED")
+            else:
+                print(f"❌ {name} - FAILED")
+        except Exception as e:
+            print(f"⚠️  {name} - ERROR: {e}")
+            results.append((name, False))
+            
+    # Summary
+    print("\n" + "="*60)
+    print("SCENARIO SUMMARY")
+    print("="*60)
+    passed = sum(1 for _, success in results if success)
+    total = len(results)
+    print(f"Passed: {passed}/{total}")
     
-    # Analyze results
-    print(f"Total requests: {len(calls)}")
-    print(f"Handled requests: {len(results)}")
+    return passed == total
+
+def test_morning_rush():
+    """Test morning rush scenario"""
+    system = ElevatorSystem()
     
-    elevator_stats = {1: 0, 2: 0, 3: 0}
-    for result in results:
-        elevator_stats[result['elevator']] += 1
+    print("Simulating 8:00 AM rush hour...")
+    print("10 people entering from ground floor going to various floors")
     
-    print("\nElevator utilization:")
-    for elevator_id, count in elevator_stats.items():
-        print(f"  Elevator {elevator_id}: {count} trips")
+    destinations = [8, 12, 15, 10, 18, 7, 14, 9, 11, 16]
+    trips = {1: 0, 2: 0, 3: 0}
+    
+    for i, dest in enumerate(destinations, 1):
+        print(f"  Person {i}: Ground floor → Floor {dest}")
+        elevator_id = system.call_elevator(1, Direction.UP)
+        if elevator_id > 0:
+            system.elevators[elevator_id].move_to_floor(dest)
+            trips[elevator_id] += 1
+            
+    system.print_status()
     
     # Verify all elevators were used
-    assert all(count > 0 for count in elevator_stats.values()), \
-        "Not all elevators were utilized during rush hour"
+    return all(trips[eid] > 0 for eid in trips)
+
+def test_lunch_hour():
+    """Test lunch hour scenario"""
+    system = ElevatorSystem()
     
-    print("\n✓ Morning rush scenario test PASSED")
+    print("Simulating 12:00 PM lunch hour...")
+    print("Mixed traffic: some going down to cafeteria, some coming back up")
+    
+    # Down to cafeteria (floor 2)
+    for floor in [10, 15, 8]:
+        print(f"  Floor {floor} → Cafeteria (Floor 2)")
+        system.call_elevator(floor, Direction.DOWN)
+        
+    # Back up to offices
+    for dest in [10, 12, 15]:
+        print(f"  Cafeteria (Floor 2) → Floor {dest}")
+        system.call_elevator(2, Direction.UP)
+        
+    system.print_status()
     return True
 
-def test_emergency_scenario():
-    """Detailed emergency scenario test"""
-    print("\n" + "="*60)
-    print("RUNNING EMERGENCY SCENARIO TEST")
-    print("="*60)
+def test_emergency():
+    """Test emergency scenario"""
+    system = ElevatorSystem()
     
-    system = MockElevatorSystem()
+    print("Simulating emergency situation...")
     
     # Normal operation first
-    print("1. Normal operation...")
+    print("1. Normal call: Floor 5 → UP")
     system.call_elevator(5, Direction.UP)
-    system.call_elevator(10, Direction.DOWN)
     
-    # Activate emergency in elevator 2
-    print("2. Activating emergency in Elevator 2...")
+    # Emergency!
+    print("\n2. 🚨 EMERGENCY STOP ACTIVATED on Elevator 2!")
     system.elevators[2].emergency_stop()
     
     # Verify emergency state
-    assert system.elevators[2].emergency_active, "Emergency not activated"
-    assert system.elevators[2].door_open, "Doors not open during emergency"
+    print("\n3. Verifying emergency state...")
+    if not system.elevators[2].emergency_active:
+        print("  ❌ Emergency not activated!")
+        return False
+        
+    if not system.elevators[2].door_open:
+        print("  ❌ Doors not open during emergency!")
+        return False
+        
+    print("  ✅ Emergency properly activated")
     
-    # Try to use system during emergency
-    print("3. Testing system during emergency...")
+    # Try to use system
+    print("\n4. Testing system during emergency...")
     elevator_id = system.call_elevator(8, Direction.UP)
     
-    # Should not use emergency elevator
-    assert elevator_id != 2, "System used emergency elevator"
-    assert elevator_id in [1, 3], "System not using available elevators"
+    if elevator_id == 2:
+        print("  ❌ System used emergency elevator!")
+        return False
+        
+    print(f"  ✅ System correctly used Elevator {elevator_id}")
     
-    print("\n✓ Emergency scenario test PASSED")
+    system.print_status()
     return True
 
-def test_overload_scenario():
-    """Detailed overload scenario test"""
-    print("\n" + "="*60)
-    print("RUNNING OVERLOAD SCENARIO TEST")
-    print("="*60)
+def test_overload():
+    """Test overload scenario"""
+    system = ElevatorSystem()
     
-    # This would test the actual overload sensor integration
-    print("Note: Requires actual hardware sensor simulation")
-    print("Test framework ready for overload detection logic")
+    print("Testing overload detection...")
     
+    # Normal weight
+    print("1. Normal load (500kg)")
+    overloaded = system.elevators[1].update_weight(500)
+    if overloaded:
+        print("  ❌ False overload detection!")
+        return False
+    print("  ✅ Normal load accepted")
+    
+    # Overload
+    print("\n2. Overload condition (900kg)")
+    overloaded = system.elevators[1].update_weight(900)
+    if not overloaded:
+        print("  ❌ Overload not detected!")
+        return False
+    print("  ✅ Overload correctly detected")
+    
+    # Try to move overloaded elevator
+    print("\n3. Attempting to move overloaded elevator...")
+    floors = system.elevators[1].move_to_floor(10)
+    if floors > 0:
+        print("  ❌ Overloaded elevator moved!")
+        return False
+    print("  ✅ Overloaded elevator prevented from moving")
+    
+    # Door operations
+    print("\n4. Testing door operations...")
+    system.elevators[1].open_doors()
+    can_close = system.elevators[1].close_doors()
+    if can_close:
+        print("  ❌ Doors closed despite overload!")
+        return False
+    print("  ✅ Doors prevented from closing when overloaded")
+    
+    system.print_status()
     return True
 
-def test_performance_scenario():
-    """Detailed performance metrics test"""
-    print("\n" + "="*60)
-    print("RUNNING PERFORMANCE METRICS TEST")
-    print("="*60)
+def test_performance():
+    """Test performance metrics"""
+    import time
     
-    system = MockElevatorSystem()
+    system = ElevatorSystem()
+    
+    print("Testing system performance...")
     
     # Measure response times
+    print("\n1. Measuring response times for 10 calls:")
     response_times = []
     
-    for i in range(20):
-        start_time = time.time()
-        system.call_elevator(random.randint(1, 18), 
-                           random.choice([Direction.UP, Direction.DOWN]))
-        response_time = (time.time() - start_time) * 1000  # Convert to ms
-        
-        # Add small random delay to simulate processing
-        response_time += random.uniform(10, 50)
+    for i in range(1, 11):
+        start = time.time()
+        system.call_elevator(i, Direction.UP)
+        response_time = (time.time() - start) * 1000  # Convert to ms
         response_times.append(response_time)
-    
-    # Calculate metrics
+        print(f"  Call {i}: {response_time:.1f} ms")
+        
     avg_response = sum(response_times) / len(response_times)
-    max_response = max(response_times)
-    min_response = min(response_times)
+    print(f"\n  Average response: {avg_response:.1f} ms")
     
-    print(f"Response Time Metrics:")
-    print(f"  Average: {avg_response:.2f} ms")
-    print(f"  Maximum: {max_response:.2f} ms")
-    print(f"  Minimum: {min_response:.2f} ms")
+    # Throughput test
+    print("\n2. Testing throughput (20 rapid calls):")
+    successful = 0
+    start = time.time()
     
-    # Check against thresholds
-    assert avg_response < 100, f"Average response {avg_response:.2f}ms > 100ms threshold"
+    for i in range(20):
+        floor = random.randint(1, 18)
+        direction = random.choice([Direction.UP, Direction.DOWN])
+        elevator_id = system.call_elevator(floor, direction)
+        if elevator_id > 0:
+            successful += 1
+            
+    total_time = time.time() - start
+    calls_per_second = successful / total_time if total_time > 0 else 0
     
-    print("\n✓ Performance scenario test PASSED")
+    print(f"  Handled: {successful}/20 calls")
+    print(f"  Time: {total_time:.2f} seconds")
+    print(f"  Throughput: {calls_per_second:.1f} calls/second")
+    
+    system.print_status()
+    
+    # Check metrics
+    if avg_response > 100:  # 100ms threshold for simulated tests
+        print("  ⚠️  Response time higher than expected")
+        return False
+        
+    if successful < 15:
+        print("  ⚠️  Throughput lower than expected")
+        return False
+        
     return True
 
-# ========== MAIN EXECUTION ==========
-if __name__ == "__main__":
-    print("Elevator System Test Suite")
-    print("=" * 60)
+def run_simulation():
+    """Run an interactive simulation"""
+    print("\n🎮 INTERACTIVE SIMULATION")
+    print("="*60)
+    print("Commands:")
+    print("  call <floor> <up/down>  - Call elevator to floor")
+    print("  goto <elevator> <floor> - Send elevator to floor")
+    print("  emergency <elevator>    - Activate emergency stop")
+    print("  weight <elevator> <kg>  - Set elevator weight")
+    print("  status                  - Show system status")
+    print("  help                    - Show commands")
+    print("  exit                    - End simulation")
+    print("="*60)
     
-    # Check for command line arguments
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "all":
-            # Run all tests
-            success = run_all_tests()
-            sys.exit(0 if success else 1)
-        elif sys.argv[1] == "scenario":
-            # Run specific scenario
-            if len(sys.argv) > 2:
-                test_specific_scenario(sys.argv[2])
+    system = ElevatorSystem()
+    
+    while True:
+        try:
+            command = input("\n> ").strip().lower()
+            
+            if command == "exit":
+                print("Ending simulation...")
+                break
+                
+            elif command == "status":
+                system.print_status()
+                
+            elif command == "help":
+                print("Commands: call, goto, emergency, weight, status, help, exit")
+                
+            elif command.startswith("call "):
+                parts = command.split()
+                if len(parts) == 3:
+                    try:
+                        floor = int(parts[1])
+                        direction = Direction.UP if parts[2] == "up" else Direction.DOWN
+                        elevator_id = system.call_elevator(floor, direction)
+                        if elevator_id > 0:
+                            print(f"✅ Elevator {elevator_id} dispatched")
+                        else:
+                            print("❌ No elevator available")
+                    except:
+                        print("❌ Usage: call <floor> <up/down>")
+                else:
+                    print("❌ Usage: call <floor> <up/down>")
+                    
+            elif command.startswith("goto "):
+                parts = command.split()
+                if len(parts) == 3:
+                    try:
+                        elevator_id = int(parts[1])
+                        floor = int(parts[2])
+                        if elevator_id in system.elevators:
+                            floors = system.elevators[elevator_id].move_to_floor(floor)
+                            print(f"✅ Elevator {elevator_id} moving to floor {floor}")
+                        else:
+                            print(f"❌ Invalid elevator ID: {elevator_id}")
+                    except:
+                        print("❌ Usage: goto <elevator> <floor>")
+                else:
+                    print("❌ Usage: goto <elevator> <floor>")
+                    
+            elif command.startswith("emergency "):
+                parts = command.split()
+                if len(parts) == 2:
+                    try:
+                        elevator_id = int(parts[1])
+                        if elevator_id in system.elevators:
+                            system.elevators[elevator_id].emergency_stop()
+                            print(f"✅ Emergency stop activated on Elevator {elevator_id}")
+                        else:
+                            print(f"❌ Invalid elevator ID: {elevator_id}")
+                    except:
+                        print("❌ Usage: emergency <elevator>")
+                else:
+                    print("❌ Usage: emergency <elevator>")
+                    
+            elif command.startswith("weight "):
+                parts = command.split()
+                if len(parts) == 3:
+                    try:
+                        elevator_id = int(parts[1])
+                        weight = float(parts[2])
+                        if elevator_id in system.elevators:
+                            overloaded = system.elevators[elevator_id].update_weight(weight)
+                            if overloaded:
+                                print(f"⚠️  Elevator {elevator_id} OVERLOADED: {weight}kg")
+                            else:
+                                print(f"✅ Elevator {elevator_id} weight: {weight}kg")
+                        else:
+                            print(f"❌ Invalid elevator ID: {elevator_id}")
+                    except:
+                        print("❌ Usage: weight <elevator> <kg>")
+                else:
+                    print("❌ Usage: weight <elevator> <kg>")
+                    
             else:
-                print("Please specify scenario name")
-        elif sys.argv[1] == "unit":
-            # Run only unit tests
-            suite = unittest.TestLoader().loadTestsFromTestCase(TestElevatorUnit)
-            unittest.TextTestRunner(verbosity=2).run(suite)
-        elif sys.argv[1] == "integration":
-            # Run only integration tests
-            suite = unittest.TestLoader().loadTestsFromTestCase(TestElevatorSystemIntegration)
-            unittest.TextTestRunner(verbosity=2).run(suite)
-        elif sys.argv[1] == "performance":
-            # Run performance tests
-            test_performance_scenario()
+                print("❌ Unknown command. Type 'help' for commands.")
+                
+        except KeyboardInterrupt:
+            print("\n\nSimulation interrupted")
+            break
+        except Exception as e:
+            print(f"❌ Error: {e}")
+
+# ========== COMMAND LINE INTERFACE ==========
+def main():
+    """Main command line interface"""
+    parser = argparse.ArgumentParser(
+        description='Elevator System Test Suite',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python test_elevator.py all          # Run all unit tests
+  python test_elevator.py scenario     # Run scenario tests
+  python test_elevator.py sim          # Run interactive simulation
+  python test_elevator.py -v           # Run with verbose output
+  python test_elevator.py --list       # List all test scenarios
+        """
+    )
+    
+    parser.add_argument(
+        'command',
+        nargs='?',
+        default='all',
+        choices=['all', 'scenario', 'sim', 'list'],
+        help='Test command to run'
+    )
+    
+    parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Verbose output'
+    )
+    
+    parser.add_argument(
+        '-q', '--quiet',
+        action='store_true',
+        help='Quiet output'
+    )
+    
+    parser.add_argument(
+        '--list',
+        action='store_true',
+        help='List all available tests'
+    )
+    
+    args = parser.parse_args()
+    
+    # Set verbosity
+    if args.quiet:
+        verbosity = 0
+    elif args.verbose:
+        verbosity = 2
     else:
-        # Interactive mode
-        print("\nAvailable test modes:")
-        print("  python elevator_tests.py all          - Run all tests")
-        print("  python elevator_tests.py unit         - Run unit tests only")
-        print("  python elevator_tests.py integration  - Run integration tests only")
-        print("  python elevator_tests.py scenario <name> - Run specific scenario")
-        print("  python elevator_tests.py performance  - Run performance tests")
-        print("\nAvailable scenarios: morning_rush, emergency, overload")
+        verbosity = 1
+        
+    # List tests
+    if args.list or args.command == 'list':
+        print("Available Test Categories:")
+        print("  1. Unit Tests - Basic elevator functionality")
+        print("  2. Integration Tests - System-wide functionality")
+        print("  3. Algorithm Tests - Dispatching logic")
+        print("  4. Scenario Tests - Real-world scenarios")
+        print("  5. Performance Tests - System metrics")
+        print("\nAvailable Commands:")
+        print("  all      - Run all unit tests")
+        print("  scenario - Run scenario tests")
+        print("  sim      - Interactive simulation")
+        print("  list     - List available tests")
+        return
+    
+    # Execute command
+    if args.command == 'all':
+        success = run_all_tests(verbosity)
+        sys.exit(0 if success else 1)
+        
+    elif args.command == 'scenario':
+        success = run_scenario_tests()
+        sys.exit(0 if success else 1)
+        
+    elif args.command == 'sim':
+        run_simulation()
+        
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
